@@ -4,18 +4,21 @@ pragma solidity 0.8.30;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC4626,ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Permit.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {ErrorsLib} from "./libraries/ErrorsLib.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IVault} from "./interfaces/IVault.sol";
 
-contract Vault is ERC4626, Ownable2Step {
+contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
     using SafeERC20 for IERC20;
 
-    /// @dev The vault fee in basis points
+    /// @inheritdoc IVault
     uint256 public immutable FEE_BPS;
     
-    /// @dev The vault fee recipient
-    address public immutable FEE_RECIPIENT;
+    /// @inheritdoc IVault
+    address public immutable FEE_RECIPIENT; 
     
     /// @dev Intiializes the contract
     /// @param _asset The address of the underlying asset
@@ -34,9 +37,11 @@ contract Vault is ERC4626, Ownable2Step {
      ERC20(_name, _symbol)
      Ownable(msg.sender)
      {
+        if (_vaultFee > 10_000) revert ErrorsLib.InvalidFeeBPS();
         FEE_BPS = _vaultFee;
         FEE_RECIPIENT = _feeRecipient;
     }
+
     /// @inheritdoc IERC4626
     /// @dev Calculates the amount of shares for a given amount of assets - `FEE_BPS` entry fee.
     /// @return The amount of shares the user will receive after the fee is taken.
@@ -51,9 +56,7 @@ contract Vault is ERC4626, Ownable2Step {
     function previewMint(uint256 shares) public view virtual override returns (uint256) {
         // Calculate net assets needed (without fee) to mint the requested shares
         uint256 netAssets = super.previewMint(shares);
-
         uint256 denominator = 10000 - FEE_BPS;
-        if (denominator == 0) revert ErrorsLib.InvalidFeeBPS(); // Fee must be < 100%
         // Gross up to include the fee
         uint256 assetsGross = (netAssets * 10000 + denominator - 1) / denominator;
         return assetsGross;
@@ -62,7 +65,7 @@ contract Vault is ERC4626, Ownable2Step {
     /// @inheritdoc IERC4626
     /// @dev Deposits assets into the vault, and take a deposit `FEE_BPS` fee and send it to `FEE_RECIPIENT`.
     /// @return The amount of shares the user will receive (after fee).
-    function deposit(uint256 assets, address receiver) public virtual override returns (uint256) {
+    function deposit(uint256 assets, address receiver) public virtual override whenNotPaused returns (uint256) {
         uint256 maxAssets = maxDeposit(receiver);
         if (assets > maxAssets) {
             revert ERC4626ExceededMaxDeposit(receiver, assets, maxAssets);
@@ -79,9 +82,34 @@ contract Vault is ERC4626, Ownable2Step {
         return shares;
     }
 
+    /// @inheritdoc IVault
+    function depositWithPermit(
+        uint256 assets, 
+        address owner,
+        address receiver, 
+        uint256 deadline, 
+        uint8 permitV, 
+        bytes32 permitR, 
+        bytes32 permitS
+    ) public virtual whenNotPaused returns (uint256) {
+        if (assets == 0) revert ErrorsLib.ZeroAssetsInAmount();
+        IERC20Permit(asset()).permit(
+            owner, 
+            address(this), 
+            assets, 
+            deadline, 
+            permitV, 
+            permitR, 
+            permitS
+        );
+        
+        return deposit(assets, receiver);
+    }
+
+    /// @inheritdoc IERC4626
     /// @dev Mints shares to `receiver` by taking the required assets (including fee) from the caller.
     /// @return The amount of assets (gross) the user must send.
-    function mint(uint256 shares, address receiver) public virtual override returns (uint256) {
+    function mint(uint256 shares, address receiver) public virtual override whenNotPaused returns (uint256) {
         uint256 maxShares = maxMint(receiver);
         if (shares > maxShares) {
             revert ERC4626ExceededMaxMint(receiver, shares, maxShares);
@@ -98,7 +126,32 @@ contract Vault is ERC4626, Ownable2Step {
         return assetsGross;
     }
 
-    function withdraw(uint256 assets, address receiver, address owner) public virtual override returns (uint256) {
+    /// @inheritdoc IVault
+    function mintWithPermit(
+        uint256 shares, 
+        address owner,
+        address receiver, 
+        uint256 deadline, 
+        uint8 permitV, 
+        bytes32 permitR, 
+        bytes32 permitS
+    ) public virtual whenNotPaused returns (uint256) {
+        if (shares == 0) revert ErrorsLib.ZeroSharesInAmount();
+        IERC20Permit(asset()).permit(
+            owner, 
+            address(this), 
+            shares, 
+            deadline, 
+            permitV, 
+            permitR, 
+            permitS
+        );
+        
+        return mint(shares, receiver);
+    }
+
+    /// @inheritdoc IERC4626
+    function withdraw(uint256 assets, address receiver, address owner) public virtual override whenNotPaused returns (uint256) {
         uint256 maxAssets = maxWithdraw(owner);
         if (assets > maxAssets) {
             revert ERC4626ExceededMaxWithdraw(owner, assets, maxAssets);
@@ -110,7 +163,8 @@ contract Vault is ERC4626, Ownable2Step {
         return shares;
     }
 
-    function redeem(uint256 shares, address receiver, address owner) public virtual override returns (uint256) {
+    /// @inheritdoc IERC4626
+    function redeem(uint256 shares, address receiver, address owner) public virtual override whenNotPaused returns (uint256) {
         uint256 maxShares = maxRedeem(owner);
         if (shares > maxShares) {
             revert ERC4626ExceededMaxRedeem(owner, shares, maxShares);
@@ -122,10 +176,26 @@ contract Vault is ERC4626, Ownable2Step {
         return assets;
     }
 
+    /// @inheritdoc IVault
+    function pause() public onlyOwner {
+        _pause();
+    }
+
+    /// @inheritdoc IVault
+    function unpause() public onlyOwner {
+        _unpause();
+    }
+
     /// @notice Calculates the fee for a given amount of assets.
     /// @param assets The amount of assets to calculate the fee for.
     /// @return The fee amount.
     function _fee(uint256 assets) internal view returns (uint256) {
         return (assets * FEE_BPS) / 10000;
+    }
+
+    /// @inheritdoc ERC4626
+    /// @dev Returns the number of decimals to add to the underlying asset's decimals.
+    function _decimalsOffset() internal view virtual override returns (uint8) {
+        return 9;
     }
 }
