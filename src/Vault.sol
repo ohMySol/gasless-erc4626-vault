@@ -14,12 +14,16 @@ import {IVault} from "./interfaces/IVault.sol";
 contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
     using SafeERC20 for IERC20;
 
+    /* IMMUTABLES */
+
     /// @inheritdoc IVault
     uint256 public immutable FEE_BPS;
     
     /// @inheritdoc IVault
     address public immutable FEE_RECIPIENT; 
     
+    /* CONSTRUCTOR */
+
     /// @dev Intiializes the contract
     /// @param _asset The address of the underlying asset
     /// @param _name The name of the vault
@@ -42,6 +46,8 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
         FEE_RECIPIENT = _feeRecipient;
     }
 
+    /* ERC4626 (PUBLIC) */
+
     /// @inheritdoc IERC4626
     /// @dev Calculates the amount of shares for a given amount of assets - `FEE_BPS` entry fee.
     /// @return The amount of shares the user will receive after the fee is taken.
@@ -63,8 +69,8 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
     }
 
     /// @inheritdoc IERC4626
-    /// @dev Deposits assets into the vault, and take a deposit `FEE_BPS` fee and send it to `FEE_RECIPIENT`.
-    /// @return The amount of shares the user will receive (after fee).
+    /// @dev Deposits assets into the vault, and take a deposit `FEE_BPS` fee.
+    /// The fee is sent to `FEE_RECIPIENT`.
     function deposit(uint256 assets, address receiver) public virtual override whenNotPaused returns (uint256) {
         uint256 maxAssets = maxDeposit(receiver);
         if (assets > maxAssets) {
@@ -82,33 +88,9 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
         return shares;
     }
 
-    /// @inheritdoc IVault
-    function depositWithPermit(
-        uint256 assets, 
-        address owner,
-        address receiver, 
-        uint256 deadline, 
-        uint8 permitV, 
-        bytes32 permitR, 
-        bytes32 permitS
-    ) public virtual whenNotPaused returns (uint256) {
-        if (assets == 0) revert ErrorsLib.ZeroAssetsInAmount();
-        IERC20Permit(asset()).permit(
-            owner, 
-            address(this), 
-            assets, 
-            deadline, 
-            permitV, 
-            permitR, 
-            permitS
-        );
-        
-        return deposit(assets, receiver);
-    }
-
     /// @inheritdoc IERC4626
     /// @dev Mints shares to `receiver` by taking the required assets (including fee) from the caller.
-    /// @return The amount of assets (gross) the user must send.
+    /// The fee is sent to `FEE_RECIPIENT`.
     function mint(uint256 shares, address receiver) public virtual override whenNotPaused returns (uint256) {
         uint256 maxShares = maxMint(receiver);
         if (shares > maxShares) {
@@ -124,30 +106,6 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
         super._deposit(_msgSender(), receiver, assetsGross - fee, shares);
         
         return assetsGross;
-    }
-
-    /// @inheritdoc IVault
-    function mintWithPermit(
-        uint256 shares, 
-        address owner,
-        address receiver, 
-        uint256 deadline, 
-        uint8 permitV, 
-        bytes32 permitR, 
-        bytes32 permitS
-    ) public virtual whenNotPaused returns (uint256) {
-        if (shares == 0) revert ErrorsLib.ZeroSharesInAmount();
-        IERC20Permit(asset()).permit(
-            owner, 
-            address(this), 
-            shares, 
-            deadline, 
-            permitV, 
-            permitR, 
-            permitS
-        );
-        
-        return mint(shares, receiver);
     }
 
     /// @inheritdoc IERC4626
@@ -176,6 +134,58 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
         return assets;
     }
 
+    /* GASLESS PUBLIC FUNCTIONS */
+
+    /// @inheritdoc IVault
+    function depositWithPermit(
+        uint256 assets, 
+        address owner,
+        address receiver, 
+        uint256 deadline, 
+        uint8 permitV, 
+        bytes32 permitR, 
+        bytes32 permitS
+    ) public virtual whenNotPaused returns (uint256) {
+        if (assets == 0) revert ErrorsLib.ZeroAssetsInAmount();
+        IERC20Permit(asset()).permit(
+            owner, 
+            address(this), 
+            assets, 
+            deadline, 
+            permitV, 
+            permitR, 
+            permitS
+        );
+        
+        return deposit(assets, receiver);
+    }
+
+    /// @inheritdoc IVault
+    function mintWithPermit(
+        uint256 shares, 
+        address owner,
+        address receiver, 
+        uint256 deadline, 
+        uint8 permitV, 
+        bytes32 permitR, 
+        bytes32 permitS
+    ) public virtual whenNotPaused returns (uint256) {
+        if (shares == 0) revert ErrorsLib.ZeroSharesInAmount();
+        IERC20Permit(asset()).permit(
+            owner, 
+            address(this), 
+            shares, 
+            deadline, 
+            permitV, 
+            permitR, 
+            permitS
+        );
+        
+        return mint(shares, receiver);
+    }
+
+    /* ONLY OWNER FUNCTIONS */
+
     /// @inheritdoc IVault
     function pause() public onlyOwner {
         _pause();
@@ -186,12 +196,16 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
         _unpause();
     }
 
+    /* INTERNAL FUNCTIONS */
+
     /// @notice Calculates the fee for a given amount of assets.
     /// @param assets The amount of assets to calculate the fee for.
     /// @return The fee amount.
     function _fee(uint256 assets) internal view returns (uint256) {
         return (assets * FEE_BPS) / 10000;
     }
+
+    /* ERC4626 (INTERNAL) */
 
     /// @inheritdoc ERC4626
     /// @dev Returns the number of decimals to add to the underlying asset's decimals.
