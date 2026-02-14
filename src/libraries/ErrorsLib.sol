@@ -12,4 +12,7 @@ library ErrorsLib {
 
     /// @notice Thrown when user minting zero shares amount
     error ZeroSharesInAmount();
+
+    /// @notice Thrown when the address is the zero address
+    error ZeroAddress();
 }

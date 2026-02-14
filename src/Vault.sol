@@ -41,7 +41,9 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
      ERC20(_name, _symbol)
      Ownable(msg.sender)
      {
-        if (_vaultFee > 10_000) revert ErrorsLib.InvalidFeeBPS();
+        if (_asset == address(0)) revert ErrorsLib.ZeroAddress();
+        if (_feeRecipient == address(0)) revert ErrorsLib.ZeroAddress();
+        if (_vaultFee >= 10_000) revert ErrorsLib.InvalidFeeBPS();
         FEE_BPS = _vaultFee;
         FEE_RECIPIENT = _feeRecipient;
     }
@@ -110,28 +112,12 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
 
     /// @inheritdoc IERC4626
     function withdraw(uint256 assets, address receiver, address owner) public virtual override whenNotPaused returns (uint256) {
-        uint256 maxAssets = maxWithdraw(owner);
-        if (assets > maxAssets) {
-            revert ERC4626ExceededMaxWithdraw(owner, assets, maxAssets);
-        }
-
-        uint256 shares = previewWithdraw(assets);
-        _withdraw(_msgSender(), receiver, owner, assets, shares);
-
-        return shares;
+        return super.withdraw(assets, receiver, owner);
     }
 
     /// @inheritdoc IERC4626
     function redeem(uint256 shares, address receiver, address owner) public virtual override whenNotPaused returns (uint256) {
-        uint256 maxShares = maxRedeem(owner);
-        if (shares > maxShares) {
-            revert ERC4626ExceededMaxRedeem(owner, shares, maxShares);
-        }
-
-        uint256 assets = previewRedeem(shares);
-        _withdraw(_msgSender(), receiver, owner, assets, shares);
-
-        return assets;
+        return super.redeem(shares, receiver, owner);
     }
 
     /* GASLESS PUBLIC FUNCTIONS */
@@ -157,7 +143,7 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
             permitS
         );
         
-        return deposit(assets, receiver);
+        return _depositFrom(owner,assets, receiver);
     }
 
     /// @inheritdoc IVault
@@ -171,17 +157,18 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
         bytes32 permitS
     ) public virtual whenNotPaused returns (uint256) {
         if (shares == 0) revert ErrorsLib.ZeroSharesInAmount();
+        uint256 grossAssets = previewMint(shares);
         IERC20Permit(asset()).permit(
             owner, 
             address(this), 
-            shares, 
+            grossAssets, 
             deadline, 
             permitV, 
             permitR, 
             permitS
         );
         
-        return mint(shares, receiver);
+        return _mintFrom(owner, shares, receiver);
     }
 
     /* ONLY OWNER FUNCTIONS */
@@ -203,6 +190,52 @@ contract Vault is ERC4626, Ownable2Step, Pausable, IVault {
     /// @return The fee amount.
     function _fee(uint256 assets) internal view returns (uint256) {
         return (assets * FEE_BPS) / 10000;
+    }
+
+    /// @notice Deposits assets from `owner` to `receiver` and takes the `FEE_BPS` fee.
+    /// 
+    /// @param owner The owner of the assets.
+    /// @param assets The amount of assets to deposit.
+    /// @param receiver The address to receive the shares.
+    /// @return The amount of shares the user will receive after the fee is taken.
+    function _depositFrom(address owner, uint256 assets, address receiver) internal returns (uint256) {
+        uint256 maxAssets = maxDeposit(receiver);
+        if (assets > maxAssets) {
+            revert ERC4626ExceededMaxDeposit(receiver, assets, maxAssets);
+        }
+
+        uint256 fee = _fee(assets);
+        if (fee > 0) {
+            IERC20(asset()).safeTransferFrom(owner, FEE_RECIPIENT, fee);
+        }
+        
+        uint256 shares = previewDeposit(assets);
+        super._deposit(owner, receiver, assets - fee, shares);
+        
+        return shares;
+    }
+
+    /// @notice Takes assets from `owner` and mints shares to `receiver` and takes the `FEE_BPS` fee.
+    /// 
+    /// @param owner The owner of the assets.
+    /// @param shares The amount of shares to mint.
+    /// @param receiver The address to receive the shares.
+    /// @return The amount of assets the user will send (including fee).
+    function _mintFrom(address owner, uint256 shares, address receiver) internal returns (uint256) {
+        uint256 maxShares = maxMint(receiver);
+        if (shares > maxShares) {
+            revert ERC4626ExceededMaxMint(receiver, shares, maxShares);
+        }
+        
+        uint256 assetsGross = previewMint(shares);
+        uint256 fee = _fee(assetsGross);
+        if (fee > 0) {
+            IERC20(asset()).safeTransferFrom(owner, FEE_RECIPIENT, fee);
+        }
+        
+        super._deposit(owner, receiver, assetsGross - fee, shares);
+        
+        return assetsGross;
     }
 
     /* ERC4626 (INTERNAL) */
